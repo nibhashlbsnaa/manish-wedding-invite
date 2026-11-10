@@ -7,7 +7,22 @@
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const rand = (a, b) => a + Math.random() * (b - a);
   const get = path => path.split('.').reduce((o, k) => (o == null ? o : o[k]), D);
-  const TBA = 'शीघ्र सूचित किया जाएगा';
+
+  /* ───── Language: ?lang= in the link, else the guest's last choice, else the default ───── */
+  const I = window.i18n;
+  const CODES = I.langs.map(l => l.code);
+  const store = {
+    get() { try { return localStorage.getItem('lang'); } catch { return null; } },
+    set(v) { try { localStorage.setItem('lang', v); } catch { /* private mode: choice lasts this visit only */ } }
+  };
+  let lang = [new URLSearchParams(location.search).get('lang'), store.get(), D.defaultLang, 'hi'].find(c => CODES.includes(c));
+  // config/dictionary values are either plain strings or { en, hi, mai }; Hindi is the fallback
+  const T = v => (v && typeof v === 'object' && !Array.isArray(v) ? (v[lang] ?? v.hi ?? '') : v ?? '');
+  const ui = (key, vars = {}) => T(I.t[key]).replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '');
+  // the companion line under a heading: English under Hindi/Maithili, Hindi under English
+  const altLang = () => (lang === 'en' ? 'hi' : 'en');
+  const alt = v => (v && typeof v === 'object' ? v[altLang()] ?? '' : '');
+  const TBA = () => ui('tba');
 
   // Tiny element builder; config text always goes through textContent.
   function h(tag, attrs = {}, ...kids) {
@@ -36,20 +51,36 @@
   const waIcon = () => $('.finale [data-share] svg').cloneNode(true);
 
   const parseISO = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
-  const fmtDate = iso => new Intl.DateTimeFormat('hi-IN', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' }).format(parseISO(iso));
+  const fmtDate = (iso, opt = { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' }) =>
+    new Intl.DateTimeFormat(I.locale[lang], opt).format(parseISO(iso));
   const mapHref = (url, place) => url || (place ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place)}` : '');
 
   function linkBtn(label, href, iconMarkup, cls = 'btn') {
     return href
       ? h('a', { class: cls, href, target: '_blank', rel: 'noopener' }, svg(iconMarkup), label)
-      : h('button', { class: cls, type: 'button', disabled: true, title: TBA }, svg(iconMarkup), label);
+      : h('button', { class: cls, type: 'button', disabled: true, title: TBA() }, svg(iconMarkup), label);
   }
 
-  /* ───── Bind simple text from config ───── */
-  $$('[data-bind]').forEach(el => {
-    const v = get(el.dataset.bind);
-    if (typeof v === 'string' && v) el.textContent = v;
-  });
+  /* ───── Put every piece of text in the current language ───── */
+  function applyText(first) {
+    root.lang = lang;
+    $$('[data-bind]').forEach(el => {
+      const v = get(el.dataset.bind);
+      // plain strings never change with language (and the split English names must not be overwritten)
+      if (typeof v === 'string' ? first && v : v) el.textContent = T(v);
+    });
+    $$('[data-i18n]').forEach(el => { el.textContent = ui(el.dataset.i18n); });
+    $$('[data-i18n-alt]').forEach(el => { el.textContent = alt(I.t[el.dataset.i18nAlt]); el.lang = altLang(); });
+    $$('[data-i18n-aria]').forEach(el => el.setAttribute('aria-label', ui(el.dataset.i18nAria)));
+    $$('[data-name]').forEach(el => {
+      const k = el.dataset.name;
+      el.textContent = lang === 'en' ? D[k] : D[`${k}Hindi`];
+      el.lang = lang === 'en' ? 'en' : 'hi';
+    });
+    $$('[data-date-long]').forEach(el => { el.textContent = fmtDate(D.weddingDate, { day: '2-digit', month: 'long', year: 'numeric' }); });
+    $$('#lang button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lang === lang)));
+  }
+  applyText(true);
 
   const wedding = parseISO(D.weddingDate);
   const part = (loc, opt) => new Intl.DateTimeFormat(loc, opt).format(wedding);
@@ -134,9 +165,10 @@
     mehndi: [['m-lotus'], '0 0 80 56'],
     sangeet: [['m-parrot'], '0 0 64 40'],
     vivah: [['m-flame', 'm-diya'], '0 -3 40 31'],
-    reception: [['m-fish'], '0 0 72 36']
+    reception: [['m-fish'], '0 0 72 36'],
+    baraat: [['m-kalash'], '0 0 60 82']
   };
-  const row = (label, value) => [h('dt', { text: label }), h('dd', { class: value ? null : 'tba', text: value || TBA })];
+  const row = (label, value) => [h('dt', { text: label }), h('dd', { class: value ? null : 'tba', text: value || TBA() })];
 
   // shortcut: entries are all-day because `time` is free display text; add a 24h start field if exact times are needed.
   function downloadICS(e) {
@@ -145,7 +177,7 @@
     const start = parseISO(e.date);
     const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
     const esc = s => String(s).replace(/[\\,;]/g, m => '\\' + m).replace(/\n/g, '\\n');
-    const venue = e.venue || (e.main && D.venue.name);
+    const venue = T(e.venue) || (e.main && T(D.venue.name));
     const ics = [
       'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Manish & Monika//Wedding Invitation//HI', 'CALSCALE:GREGORIAN',
       'BEGIN:VEVENT',
@@ -153,8 +185,8 @@
       `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').split('.')[0]}Z`,
       `DTSTART;VALUE=DATE:${ymd(start)}`,
       `DTEND;VALUE=DATE:${ymd(end)}`,
-      `SUMMARY:${esc(`${e.name} · ${D.groom} & ${D.bride}`)}`,
-      `DESCRIPTION:${esc([e.description, e.time].filter(Boolean).join('\n'))}`,
+      `SUMMARY:${esc(`${T(e.name)} · ${D.groom} & ${D.bride}`)}`,
+      `DESCRIPTION:${esc([T(e.description), T(e.time)].filter(Boolean).join('\n'))}`,
       venue && `LOCATION:${esc(venue)}`,
       'END:VEVENT', 'END:VCALENDAR'
     ].filter(Boolean).join('\r\n');
@@ -165,47 +197,64 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 1500);
   }
 
-  $('#events-list').append(...D.events.map((e, i) => {
-    const [ids, vb] = EVENT_ICONS[e.key] || EVENT_ICONS.vivah;
-    const venue = e.venue || (e.main ? D.venue.name : '');
-    return h('article', { class: `event reveal${e.main ? ' event--main' : ''}`, style: `--i:${i % 3}` },
-      h('div', { class: 'event__top' },
-        icon(ids, vb, 'event__icon'),
-        h('div', {}, h('h3', { class: 'event__name', text: e.name }), h('span', { class: 'event__en', lang: 'en', text: e.nameEn }))),
-      h('dl', { class: 'event__meta' }, row('तिथि', e.date && fmtDate(e.date)), row('समय', e.time), row('स्थान', venue)),
-      h('p', { class: 'event__desc', text: e.description }),
-      h('div', { class: 'event__actions' },
-        linkBtn('मानचित्र', mapHref(e.mapUrl || (e.main ? D.venue.mapUrl : ''), venue), PIN),
-        e.date
-          ? h('button', { class: 'btn', type: 'button', onclick: () => downloadICS(e) }, svg(CAL), 'कैलेंडर में जोड़ें')
-          : h('button', { class: 'btn', type: 'button', disabled: true, title: TBA }, svg(CAL), 'कैलेंडर में जोड़ें')));
-  }));
+  /* ───── Generated sections; rebuilt whenever the language changes ───── */
+  function renderSections() {
+    $('#events-list').replaceChildren(...D.events.map((e, i) => {
+      const [ids, vb] = EVENT_ICONS[e.key] || EVENT_ICONS.vivah;
+      const venue = T(e.venue) || (e.main ? T(D.venue.name) : '');
+      return h('article', { class: `event reveal${e.main ? ' event--main' : ''}`, style: `--i:${i % 3}` },
+        h('div', { class: 'event__top' },
+          icon(ids, vb, 'event__icon'),
+          h('div', {}, h('h3', { class: 'event__name', text: T(e.name) }), h('span', { class: 'event__en', lang: altLang(), text: alt(e.name) }))),
+        h('dl', { class: 'event__meta' }, row(ui('date'), e.date && fmtDate(e.date)), row(ui('time'), T(e.time)), row(ui('place'), venue)),
+        h('p', { class: 'event__desc', text: T(e.description) }),
+        h('div', { class: 'event__actions' },
+          linkBtn(ui('map'), mapHref(e.mapUrl || (e.main ? D.venue.mapUrl : ''), venue), PIN),
+          e.date
+            ? h('button', { class: 'btn', type: 'button', onclick: () => downloadICS(e) }, svg(CAL), ui('addCal'))
+            : h('button', { class: 'btn', type: 'button', disabled: true, title: TBA() }, svg(CAL), ui('addCal'))));
+    }));
 
-  /* ───── Story ───── */
-  $('#story-list').append(...D.story.map((s, i) =>
-    h('li', { class: 'tl-item reveal', style: `--i:${i % 2}` },
-      h('span', { class: 'tl-item__node' }, icon('m-lotus', '0 0 80 56')),
-      h('h3', { text: s.title }),
-      h('p', { text: s.text }))));
+    $('#story-list').replaceChildren(...D.story.map((s, i) =>
+      h('li', { class: 'tl-item reveal', style: `--i:${i % 2}` },
+        h('span', { class: 'tl-item__node' }, icon('m-lotus', '0 0 80 56')),
+        h('h3', { text: T(s.title) }),
+        h('p', { text: T(s.text) }))));
 
-  /* ───── Family ───── */
-  $('#family-list').append(...[['groomSide', "Groom's family"], ['brideSide', "Bride's family"]].map(([k, en], i) => {
-    const f = D.family[k];
-    return h('article', { class: 'family__side reveal', style: `--i:${i}` },
-      h('h3', { text: f.title }),
-      h('p', { class: 'family__en', lang: 'en', text: en }),
-      h('ul', {}, f.members.length ? f.members.map(m => h('li', { text: m })) : h('li', { class: 'tba', text: TBA })));
-  }));
+    $('#family-list').replaceChildren(...['groomSide', 'brideSide'].map((k, i) => {
+      const f = D.family[k];
+      return h('article', { class: 'family__side reveal', style: `--i:${i}` },
+        h('h3', { text: T(f.title) }),
+        h('p', { class: 'family__en', lang: altLang(), text: alt(f.title) }),
+        h('ul', {}, f.members.length ? f.members.map(m => h('li', { text: T(m) })) : h('li', { class: 'tba', text: TBA() })));
+    }));
 
-  /* ───── Venue ───── */
-  const v = D.venue;
-  $('#venue-card').append(...[
-    h('p', { class: `venue__name${v.name ? '' : ' tba'}`, text: v.name || `स्थान ${TBA}` }),
-    h('p', { class: `venue__address${v.address ? '' : ' tba'}`, text: v.address || 'पता एवं मानचित्र शीघ्र उपलब्ध होंगे' }),
-    linkBtn('मानचित्र में देखें', mapHref(v.mapUrl, [v.name, v.address].filter(Boolean).join(', ')), PIN, 'btn btn--gold'),
-    v.embedUrl && h('div', { class: 'venue__map' },
-      h('iframe', { src: v.embedUrl, loading: 'lazy', title: 'विवाह स्थल का मानचित्र', referrerpolicy: 'no-referrer-when-downgrade', allowfullscreen: true }))
-  ].filter(Boolean));
+    const v = D.venue;
+    const [vName, vAddr] = [T(v.name), T(v.address)];
+    $('#venue-card').replaceChildren(...[
+      h('p', { class: `venue__name${vName ? '' : ' tba'}`, text: vName || ui('venueTba') }),
+      h('p', { class: `venue__address${vAddr ? '' : ' tba'}`, text: vAddr || ui('addressTba') }),
+      linkBtn(ui('viewMap'), mapHref(v.mapUrl, [vName, vAddr].filter(Boolean).join(', ')), PIN, 'btn btn--gold'),
+      v.embedUrl && h('div', { class: 'venue__map' },
+        h('iframe', { src: v.embedUrl, loading: 'lazy', title: ui('mapTitle'), referrerpolicy: 'no-referrer-when-downgrade', allowfullscreen: true }))
+    ].filter(Boolean));
+
+    const r = D.rsvp;
+    const rsvpActions = [
+      r.whatsapp && h('a', { class: 'btn btn--solid', href: `https://wa.me/${r.whatsapp.replace(/\D/g, '')}?text=${encodeURIComponent(T(r.message))}`, target: '_blank', rel: 'noopener' }, waIcon(), ui('rsvpConfirm')),
+      r.formUrl && h('a', { class: 'btn', href: r.formUrl, target: '_blank', rel: 'noopener' }, ui('rsvpForm'))
+    ].filter(Boolean);
+    $('#rsvp-body').replaceChildren(...[
+      h('p', { class: 'rsvp__lead', text: rsvpActions.length || D.contacts.length ? ui('rsvpLead') : ui('rsvpTba') }),
+      rsvpActions.length && h('div', { class: 'rsvp__actions' }, rsvpActions),
+      D.contacts.length && h('ul', { class: 'contacts' }, D.contacts.map(c =>
+        h('li', { class: 'contact' },
+          h('span', {}, h('span', { class: 'contact__name', text: T(c.name) }), c.relation && h('span', { class: 'contact__rel', text: T(c.relation) })),
+          c.phone && h('a', { class: 'btn', href: `tel:+${c.phone.replace(/\D/g, '')}`, 'aria-label': ui('callWho', { name: T(c.name) }) }, svg(PHONE), ui('call'))))),
+      h('div', { class: 'rsvp__actions' }, h('button', { class: 'btn', type: 'button', 'data-share': '' }, waIcon(), ui('share')))
+    ].filter(Boolean));
+  }
+  renderSections();
 
   /* ───── Gallery (hidden until photos are added) ───── */
   if (D.gallery.length) {
@@ -214,38 +263,28 @@
       h('figure', { class: 'reveal', style: `--i:${i % 3}` }, h('img', { src: g.src, alt: g.alt || '', loading: 'lazy', decoding: 'async' }))));
   }
 
-  /* ───── RSVP & contacts ───── */
-  const r = D.rsvp;
-  const rsvpActions = [
-    r.whatsapp && h('a', { class: 'btn btn--solid', href: `https://wa.me/${r.whatsapp.replace(/\D/g, '')}?text=${encodeURIComponent(r.message)}`, target: '_blank', rel: 'noopener' }, waIcon(), 'उपस्थिति की पुष्टि करें'),
-    r.formUrl && h('a', { class: 'btn', href: r.formUrl, target: '_blank', rel: 'noopener' }, 'RSVP फ़ॉर्म भरें')
-  ].filter(Boolean);
-  $('#rsvp-body').append(...[
-    h('p', { class: 'rsvp__lead', text: rsvpActions.length ? 'कृपया अपनी उपस्थिति की सूचना देकर हमें अनुगृहीत करें।' : `उपस्थिति एवं संपर्क विवरण ${TBA}।` }),
-    rsvpActions.length && h('div', { class: 'rsvp__actions' }, rsvpActions),
-    D.contacts.length && h('ul', { class: 'contacts' }, D.contacts.map(c =>
-      h('li', { class: 'contact' },
-        h('span', {}, h('span', { class: 'contact__name', text: c.name }), c.relation && h('span', { class: 'contact__rel', text: c.relation })),
-        c.phone && h('a', { class: 'btn', href: `tel:+${c.phone.replace(/\D/g, '')}`, 'aria-label': `${c.name} को कॉल करें` }, svg(PHONE), 'कॉल')))),
-    h('div', { class: 'rsvp__actions' }, h('button', { class: 'btn', type: 'button', 'data-share': '' }, waIcon(), 'आमंत्रण साझा करें'))
-  ].filter(Boolean));
-
-  /* ───── WhatsApp share ───── */
-  $$('[data-share]').forEach(b => b.addEventListener('click', () => {
-    const text = `${D.share.message}\n\n${location.href.split('#')[0]}`;
-    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
-  }));
+  /* ───── WhatsApp share (delegated: share buttons are rebuilt on language change) ───── */
+  document.addEventListener('click', e => {
+    if (!e.target.closest('[data-share]')) return;
+    const url = new URL(location.href);
+    url.hash = '';
+    url.searchParams.set('lang', lang); // the guest you share with opens it in the same language
+    window.open(`https://wa.me/?text=${encodeURIComponent(`${T(D.share.message)}\n\n${url}`)}`, '_blank', 'noopener');
+  });
 
   /* ───── Music (never autoplays; starts only from the संगीत button) ───── */
+  const musicBtn = $('#music-btn');
+  const musicLabel = () => musicBtn.setAttribute('aria-label', ui(musicBtn.getAttribute('aria-pressed') === 'true' ? 'musicPause' : 'musicPlay'));
+  musicLabel();
   if (D.music) {
-    const btn = $('#music-btn');
+    const btn = musicBtn;
     const audio = $('#music-audio');
     audio.src = D.music;
     audio.volume = .6;
     $('#music').hidden = false;
     const set = on => {
       btn.setAttribute('aria-pressed', String(on));
-      btn.setAttribute('aria-label', on ? 'संगीत रोकें / Pause music' : 'संगीत चलाएँ / Play music');
+      musicLabel();
     };
     btn.addEventListener('click', () => (audio.paused ? audio.play().catch(() => set(false)) : audio.pause()));
     audio.addEventListener('play', () => set(true));
@@ -308,4 +347,21 @@
   }
   $('#gate-open').addEventListener('click', openGate);
   $('.portal').addEventListener('click', openGate);
+
+  /* ───── Language switcher ───── */
+  function setLang(code) {
+    if (code === lang || !CODES.includes(code)) return;
+    lang = code;
+    store.set(code);
+    const url = new URL(location.href);
+    url.searchParams.set('lang', code);
+    history.replaceState(history.state, '', url);
+    applyText(false);
+    renderSections();
+    musicLabel();
+    // rebuilt cards start hidden; reveal them as they come into view (immediately if already on screen)
+    $$('#events-list .reveal, #story-list .reveal, #family-list .reveal').forEach(el => showIO.observe(el));
+  }
+  $('#lang').append(...I.langs.map(l =>
+    h('button', { type: 'button', lang: l.code, 'data-lang': l.code, 'aria-pressed': String(l.code === lang), onclick: () => setLang(l.code) }, l.label)));
 })();
